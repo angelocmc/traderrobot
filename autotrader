@@ -1,0 +1,749 @@
+#property copyright "NEW ACMC RMC Robo Trader Ltd. Copyright 2023"
+#property link      "https://www.google.com.br"
+#property version   "8.88"
+#include <Trade/Trade.mqh>
+
+/************************************* Créditos **************************************
+
+Breubanga - Development & IT Support
+Zapetico - Quality Assurance & Market Analysis
+
+*************************************************************************************/ 
+
+
+/***************** Release Notes, Feature Logs & Bug Fix *****************************
+
+24/10/2023 - Breu - Identificar quando acontece o marubozu da estratégia
+24/10/2023 - Breu - Enviar todas as ordens da estratégia quando acontecer o marubozu 
+24/10/2023 - Breu - Limitar a apenas um trade por dia
+24/10/2023 - Breu - Desconsiderar primeiro candle do dia
+ 
+25/10/2023 - Quil - Deletar todas as ordens em caso de stop ou win 
+25/10/2023 - Quil - Definir horario que as negociações são permitidas e horario de fechamento de posições
+25/10/2023 - Quil - Fechar posições em aberto caso atinja o horario de fechamento de posições
+25/10/2023 - Quil - Bug fix: Corrigir problema no fechamento de posições às 16h30
+
+25/10/2023 - Breu - Organização do código e função para colocar ordens
+25/10/2023 - Breu - Permitir funcionamento no mini contrato apenas com a variavel testeContratoFuturo
+25/10/2023 - Breu - Bug fix: Desconsidera primeiro candle do dia, só habilita 1 trade por data, correção no valor do envio da ordem
+25/10/2023 - Breu - Bug fix: No caso de não ter ocorrido trade no dia e fechar com marubozu
+
+26/10/2023 - Breu - Programar entrada de suporte e resistencia e acertar de primeira
+26/10/2023 - Breu - Programar entrada de dois candles consecutivos
+26/10/2023 - Breu - Testar o robo para o ano todo em diversas ações diferentes e no mini contrato futuro
+
+Próximos passos:
+- Otimizar robo para outras ações, para verificar em quais outras pode funcionar bem 
+
+*************************************************************************************/     
+ 
+
+/***************** Definição das variáveis iniciais globais *************************/
+      
+      // Variavel para realizar trade no Metatrader5
+      CTrade trade;  // Componente para fazer trade
+      
+      //Variavel para mini contrato futuro 
+      bool testeContratoFuturo = false; // Especialmente para testes das 9h as 10h para pegar confiança no robo
+      
+      // Variaveis do trade que poderão ser modificadas
+      int QuantidadeInicialAcoes = 100000; //Valor inicial de ações a ser utilizado, caso em um mes dobre deve ser alterado manualmente
+      double MaxLoss = 0.09;  // Perda máxima permitida em centavos, variavel ainda não utilizada pelo robo
+      double TargetProfit = 0.10;  // Lucro alvo em centavos, variavel ainda não utilizada pelo robo
+      double StopLoss = 0; //variavel não utilizada pelo robo
+      double TakeProfit = 0; //variavel não utilizada pelo robo
+      double umCentavo = 0.00; //variavel para otimizacao do stop
+      
+      // Variaveis de controle do robo
+      int TradeActive = 0;  // Variável para identificar se um trade está ativo
+      int TradeOcurredThisDay = 1; // Variável para identificar se ocorreu um trade neste dia, robo só funciona se for igual a 0
+      int tipoTrade = 0;    //Tipo trade indica se é 1 Compra ou -1 Venda
+      int quantidadeVitorias = 0; // Variável para identificar quantas vitórias ocorreram no dia, variavel ainda não utilizada pelo robo
+      int TradeAtivo = 0;  // Variável para verificar se o robo entrou em um trade
+      double valorEntrada = 0; //Preço base de entrada da estratégia naquele dia, todos valores de stop e win serão calculados a partir dela
+      
+      //  Variaveis para controle do tempo do trade, inicio, fim e fechamento
+      int horaInicioAbertura = 10; //Horario de inicio de trade
+      int minutoInicioAbertura = 00; //Min inicio trade
+      int horaFimAbertura = 15; //Horario limite trade
+      int minutoFimAbertura = 00; //Min fim trade
+      int horaInicioFechamento = 16; //Horario fechamento posicoes
+      int minutoInicioFechamento = 30; //min fechamento posicoes
+      
+      // Variaveis com valores do candle anterior
+      double candleHigh;  // Alta do candle anterior
+      double candleLow;   // Baixa do candle anterior
+      double candleClose; // Fechamento do candle anterior      
+      double candleOpen;  // Abertura do candle anterior   
+      datetime candleTime;  // Data do candle anterior  
+
+      // Variaveis para controle de virada de dia
+      datetime candleTime1;  // Este deve ser o primeiro candle do dia
+      datetime candleTime2;  // Este deve ser o ultimo candle do dia   
+      int timeDifference; //Se a diferença entre eles for maior de 5 minutos então virou o dia
+      int ultimoDialiberacao = 0; //Dia da última vez que o TradeOcurredThisDay foi liberado
+      int ultimoMesliberacao = 0; //Mês da última vez que o TradeOcurredThisDay foi liberado
+      int ultimoAnoliberacao = 0; //Ano da última vez que o TradeOcurredThisDay foi liberado
+      
+      // Variaveis entrada marubozu
+      double tamanhoCandle = 0.10; // Tamanho mínimo do candle para ser considerado marubozu
+      double tamanhoSombra = 0.01; // Tamanho máximo aceitável para cada uma das sombras para ser considerado marubozu
+      
+      // Variaveis entrada suporte e resistencia
+      double maximaDia; //Valor da maxima do dia
+      double minimaDia; //Valor da minima do dia
+      int quantasVezesTocouMaximaDia = 0; //Quantas vezes tocou a máxima, necessário duas vezes
+      int quantasVezesTocouMinimaDia = 0; //Quantas vezes tocou a mínima, necessário duas vezes
+      datetime dataCandleMaxima1; //Data do primeiro candle a atingir a maxima
+      datetime dataCandleMaxima2; //Data do segundo candle a atingir a maxima
+      datetime dataCandleMinima1; //Data do primeiro candle a atingir a minima
+      datetime dataCandleMinima2; //Data do segundo candle a atingir a minima
+      
+      // Variaveis entrada dois candles seguidos
+      int tipoUltimoCandleAnalisado = 0; //O-candle deve ser desconsiderado 1-Ultimo candle de alta 2-Ultimo candle de baixa
+      datetime dataUltimoCandleAnalisado; //Data do ultimo candle analisado na estratégia de 2 candles seguidos
+      double maximaUltimoCandleAnalisado; //Valor da máxima do último candle analisado 
+      double minimaUltimoCandleAnalisado; //Valor da minima do último candle analisado 
+      
+      // Variaveis do Metatrader5
+      MqlRates candles[]; //Array com os ultimos 4 candles de 5 minutos
+      MqlDateTime horaAtual; //Hora atual
+
+
+/************************************* Código e Funções ***************************************/
+
+int OnInit()
+  {
+      TimeToStruct(TimeCurrent(),horaAtual); //pegar hora atual
+      Print("######## Estrategia Iniciando: "+IntegerToString(horaAtual.day)+"/"+IntegerToString(horaAtual.mon)+"/"+IntegerToString(horaAtual.year)+" "+IntegerToString(horaAtual.hour)+":"+IntegerToString(horaAtual.min)+":"+IntegerToString(horaAtual.sec)+" ########");
+     
+      if (testeContratoFuturo)
+      {
+          horaInicioAbertura = 9;
+          tamanhoCandle = 80;
+          tamanhoSombra = 80;          
+      }     
+     
+      return(INIT_SUCCEEDED);
+  }
+
+
+void OnDeinit(const int reason)
+  {
+   
+  }
+  
+
+//deletar todas as ordens  
+void DeletaOrdens() 
+{
+   for(int i = OrdersTotal()-1; i>=0 ; i--)
+   {
+      ulong ticket = OrderGetTicket(i);
+      string symbol = OrderGetString(ORDER_SYMBOL);
+      ulong magic = OrderGetInteger(ORDER_MAGIC);
+      if(symbol == _Symbol)
+      {
+         if(trade.OrderDelete(ticket))
+         {
+           Print("ORDEM DELETADA -sem falha");
+         }
+         else
+         {
+            Print("ORDEM DELETADA -com falha");
+         }
+      }
+   }
+}
+
+//fechar posicoes em aberto    
+void FechaPosicao() 
+{
+   for(int i = PositionsTotal()-1; i>=0 ; i--)
+   {
+      string symbol = PositionGetSymbol(i);
+      ulong magic = PositionGetInteger(POSITION_MAGIC);
+      if(symbol == _Symbol)
+      {
+         ulong PositionTicket = PositionGetInteger(POSITION_TICKET);
+         
+         if(trade.PositionClose(PositionTicket,50))
+         {
+             Print("POSICAO FECHADA -sem falha");
+         }
+         else
+         {
+             Print("posicao FECHADA -com falha");
+         }
+      }
+   }
+}
+
+
+//horario de fechamento de posicoes
+bool HoraFechamento() 
+{
+   TimeToStruct(TimeCurrent(),horaAtual); //pegar hora atual
+   
+   return (horaAtual.hour >= horaInicioFechamento && horaAtual.min >= minutoInicioFechamento);
+}
+
+// Valida se esta dentro do horario que as negociacoes sao permitidas    
+bool HoraNegociacao() 
+{
+   TimeToStruct(TimeCurrent(),horaAtual); //pegar hora atual
+   
+   if(horaAtual.hour >= horaInicioAbertura && horaAtual.hour <= horaFimAbertura)
+   {
+     if(horaAtual.hour == horaInicioAbertura && horaAtual.min >= minutoInicioAbertura)
+     {
+        return true;
+     }
+     else
+     {
+        return false;
+     }
+     if(horaAtual.hour == horaFimAbertura && horaAtual.min <= minutoFimAbertura)
+     {
+       return true;
+     }
+     else
+     {
+       return false;
+     }
+     
+     return true;
+   }
+   
+   return false;
+}
+  
+
+void OnTick()
+  {
+      //Print("Tick"); //Função que ocorre a cada tick
+      
+      // Obtenção dos últimos 4 candles necessários para:
+      // Verificar se ocorreu marubozu no candle anterior, candles[1] é o candle anterior
+      // Verificar máximas e mínimas do dia 
+      // Verificar se virou o dia
+      // candles[0] é o candle vigente, que pode ter acabado de abrir, onde pode acontecer o primeiro trade dia (terceiro candle)
+      // candles[1] é o candle anterior, segundo candle do dia, que pode ser o marubozu e sinalizar a entrada
+      // candles[2] é o primeiro candle do dia, ele será usado para comparar com o candle do dia anterior
+      // candles[3] é o candle do dia anterior, último candle do dia anterior
+      CopyRates(_Symbol, PERIOD_M5,0,4,candles); //Ultimos 4 candles de 5 minutos
+      ArraySetAsSeries(candles,true);
+      
+      // Se esta na hora de fechamento, fecha todas as posicões em aberto
+      if(HoraFechamento()) 
+      {
+        FechaPosicao();
+      }
+      
+      // Se existe posições em aberto sinalizar na variavel de controle 
+      if (PositionsTotal() != 0) 
+      {
+         TradeAtivo = 1;
+      }
+      
+      // Se a variavel de controle indica que posição estava aberta mas encerrou então deve deletar todas as ordens remanescentes
+      // Isso ocorre no caso de stop ou win na estratégia
+      if (TradeAtivo == 1 && PositionsTotal() == 0)
+      {
+         DeletaOrdens();
+         TradeAtivo = 0;
+      }
+      
+      //Exemplo de obtenção de dados dos candles
+      //Print(candles[1].close);
+      //Print(candles[1].open);
+      //Print(candles[1].high);
+      //Print(candles[1].low);
+      //Print(candles[1].time);
+      
+      //Caso não tenha ocorrido trade até o horário limite
+      //Sinalizar como se um trade tivesse acontecido
+      //Para somente realizar outro trade após as regras definidas
+      //Ou seja, esperar virar o dia e desconsiderar o primeiro candle do dia 
+      TimeToStruct(TimeCurrent(),horaAtual); //pegar hora atual
+      if (TradeOcurredThisDay == 0 && horaAtual.hour>=horaFimAbertura)
+      {
+          TradeOcurredThisDay = 1;
+      }
+      
+      //Caso já tenha ocorrido um trade, quando virar o dia precisa abilitar novamente o robo
+      //Entretanto somente resetar após fechado o primeiro candle do dia, para também desconsiderar o primeiro candle do dia
+      if (TradeOcurredThisDay == 1)
+      {
+         candleTime1 = candles[2].time; // Verificar se foi o primeio candle do dia atual
+         candleTime2 = candles[3].time; // Verificar se foi o último candle do dia anterior 
+         //Se a diferença entre eles for maior de 5 minutos trata-se do primeiro e último candles do dia
+         
+         // Calcular a diferença de tempo entre eles em segundos
+         timeDifference = candleTime1-candleTime2;
+
+         // Verificar se a diferença entre eles é maior que 5 minutos (600 segundos)
+         // 10.000 segundos equivale a quase 3 horas como margem de garantia
+         if (timeDifference > 10000)
+         {
+            //Print do que esta sendo comparado
+            //Print(   TimeToString(candleTime1,TIME_DATE) + "    " + TimeToString(candleTime2,TIME_DATE) + "   " + IntegerToString(timeDifference));
+
+            //Print de quando foi identificado
+            //Print("É o primeiro candle de 5 minutos do dia.");
+            
+            //Caso tenha passado o primeiro candle do dia, e também encerrado o segundo candle do dia
+            //Então já pode fazer novos trades e ativar o robo, somente será considerado marubozu no segundo candle do dia para frente
+            //Mas somente sera liberado novo trade caso a ultima data liberada seja pelo menos um dia anterior a data atual
+            //Dessa forma é liberado apenas um trade por dia
+            TimeToStruct(TimeCurrent(),horaAtual); //pegar hora atual
+            if (horaAtual.day > ultimoDialiberacao || horaAtual.mon > ultimoMesliberacao || horaAtual.year > ultimoAnoliberacao)
+            {
+              ultimoDialiberacao = horaAtual.day;
+              ultimoMesliberacao = horaAtual.mon;
+              ultimoAnoliberacao = horaAtual.year;
+              TradeActive = 0;
+              
+              // Se não existem ordens ativas pode liberar o robo para fazer trade
+              if (OrdersTotal() == 0)
+              {
+                   //ESTA É A PRINCIPAL VARIÁVEL DO ROBO E AQUI É O ÚNICO LOCAL ONDE ELA É ATIVADA PERMITINDO QUE O ROBO FAÇA TRADE
+                   TradeOcurredThisDay = 0;
+              }
+              
+              //Como é o começo de um novo dia, obtém a máxima e mínima inicial daquele dia
+              maximaDia = candles[2].high; //Pega a máxima inicial através do primeiro candle do dia
+              minimaDia = candles[2].low; //Pega a mínima inicial através do primeiro candle do dia
+              quantasVezesTocouMaximaDia = 0; //Dia esta começando, não tocou a máxima, desconsidera primeiro candle do dia na conta
+              quantasVezesTocouMinimaDia = 0; //Dia esta começando, não tocou a mínima, desconsidera primeiro candle do dia na conta
+              dataCandleMaxima1 = NULL; //Data do primeiro candle a atingir a maxima
+              dataCandleMaxima2 = NULL; //Data do segundo candle a atingir a maxima
+              dataCandleMinima1 = NULL; //Data do primeiro candle a atingir a minima
+              dataCandleMinima2 = NULL; //Data do segundo candle a atingir a minima
+              
+              //Como é o começo de um novo dia, o primeiro candle não deve ser considerado para a regra dos dois candles seguidos
+              tipoUltimoCandleAnalisado = 0; //Não considerar se primeiro candle do dia foi de alta ou de baixa
+              dataUltimoCandleAnalisado = NULL; //Data do último candle analisado, se foi de alta ou de baixa
+            }
+         }
+      }
+      
+      //Caso nao tenha ocorrido nenhum trade no dia, o robo esta ativo e pode operar
+      if (TradeOcurredThisDay == 0) 
+      {
+        // Toda análise da estratégia é feita com base no candle anterior, então abaixo armazenamos os valores
+        candleHigh = candles[1].high; // Alta do candle anterior
+        candleLow = candles[1].low;   // Baixa do candle anterior
+        candleClose = candles[1].close; // Fechamento do candle anterior
+        candleOpen = candles[1].open; // Abertura do candle anterior
+        candleTime = candles[1].time; // Data do candle anterior
+      
+        // Verificar se atende o rompimento de suporte e resistencia da estrategia
+        // Devem haver dois candles anteriores, com exeção do primeiro candle do dia, tocando a máxima ou a mínima do dia
+        // Com margem de 1 centavo, as ordens iniciais são colocadas a 1 centavo da máxima ou da mínima
+        if (VerificarOcorreuRompimento()) 
+        {
+            //Registrar ocorrencia da estrategia
+            Print("OCORREU ROMPIMENTO" + IntegerToString(candles[1].time) + " Tipo: " + IntegerToString(tipoTrade));
+        }            
+        
+        // Verificar se atende os dois candles seguidos da estrategia com tamanho definidos
+        // As ordens iniciais são colocadas a 1 centavo da máxima ou da mínima        
+        if (VerificarDoisCandlesSeguidos())
+        {
+            //Registrar ocorrencia da estrategia
+            Print("OCORREU DOIS SEGUIDOS" + IntegerToString(candles[1].time) + " Tipo: " + IntegerToString(tipoTrade));        
+        }
+      
+        // Verificar se atende o marubozu da estrategia com tamanho e sombras definidos
+        // As ordens iniciais são colocadas a 1 centavo da máxima ou da mínima
+        if (VerificarOcorreuMarubozu()) 
+        {
+            //Registrar ocorrencia da estrategia
+            Print("OCORREU MARUBOZU" + IntegerToString(candles[1].time) + " Tipo: " + IntegerToString(tipoTrade));
+        }    
+      }      
+  }
+
+void enviarOrdensCompra()
+{
+   //Apenas envia ordem caso não existam outras ordens e esteja dentro do horário de negociação permitido
+   if (PositionsTotal() == 0 && HoraNegociacao() && TradeActive == 0 && TradeOcurredThisDay == 0 && OrdersTotal() == 0)
+   {
+        //indica que o trade é de compra
+        tipoTrade = 1; 
+        
+        //Indicar que esta ocorrendo trade, só irá finalizar com stop ou win
+        TradeActive = 1;
+            
+        //Indicar que ocorreu um trade neste dia e não deve ocorrer outro
+        TradeOcurredThisDay = 1;  
+ 
+        //No caso de teste no contrato futuro sempre usar 5 minis e os stops e wins variam de 10 em 10 pontos
+        if (testeContratoFuturo)
+        {
+           //ENVIA TODAS AS ORDENS DO TRADE DE COMPRA
+           //ordem de entrada
+           trade.BuyStop(1, valorEntrada, _Symbol, valorEntrada - 10, 0,ORDER_TIME_DAY,0,"");
+           //primeiro win
+           trade.BuyStop(1, valorEntrada + 10, _Symbol, valorEntrada, 0,ORDER_TIME_DAY,0,"");
+           //segundo win
+           trade.BuyStop(1*2, valorEntrada + 20, _Symbol, valorEntrada + 10, 0,ORDER_TIME_DAY,0,"");    
+           //terceiro win
+           trade.BuyStop(1*4, valorEntrada + 30, _Symbol, valorEntrada + 20, 0,ORDER_TIME_DAY,0,"");   
+           //quarto win
+           trade.BuyStop(1*8, valorEntrada + 40, _Symbol, valorEntrada + 30, 0,ORDER_TIME_DAY,0,"");              
+           //quinto win
+           trade.SellLimit(1*16, valorEntrada + 50, _Symbol, valorEntrada + 60, 0,ORDER_TIME_DAY,0,"");
+        }
+        else
+        {
+           //Ajuste otimização, ao invés de 1 centavo acima entra 1 centavo abaixo
+           //valorEntrada=valorEntrada-0.02;
+        
+           //ENVIA TODAS AS ORDENS DO TRADE DE COMPRA
+           //ordem de entrada
+           trade.BuyStop(QuantidadeInicialAcoes, valorEntrada, _Symbol, valorEntrada - 0.09+umCentavo, 0,ORDER_TIME_DAY,0,"");
+           //primeiro win
+           trade.BuyStop(QuantidadeInicialAcoes, valorEntrada + 0.10, _Symbol, valorEntrada + 0.01+umCentavo, 0,ORDER_TIME_DAY,0,"");
+           //segundo win
+           trade.BuyStop(QuantidadeInicialAcoes*2, valorEntrada + 0.20, _Symbol, valorEntrada + 0.11+umCentavo, 0,ORDER_TIME_DAY,0,"");    
+           //terceiro win
+           trade.BuyStop(QuantidadeInicialAcoes*4, valorEntrada + 0.30, _Symbol, valorEntrada + 0.21+umCentavo, 0,ORDER_TIME_DAY,0,"");   
+           //quarto win
+           trade.BuyStop(QuantidadeInicialAcoes*8, valorEntrada + 0.40, _Symbol, valorEntrada + 0.31+umCentavo, 0,ORDER_TIME_DAY,0,"");              
+
+           //Caso queira fazer um 6
+           //trade.BuyStop(QuantidadeInicialAcoes*16, valorEntrada + 0.50, _Symbol, valorEntrada + 0.41, 0,ORDER_TIME_DAY,0,"");
+           
+           //Caso queira fazer um 7
+           //trade.BuyStop(QuantidadeInicialAcoes*32, valorEntrada + 0.60, _Symbol, valorEntrada + 0.51, 0,ORDER_TIME_DAY,0,""); 
+           
+           //Caso queira fazer um 8
+           //trade.BuyStop(QuantidadeInicialAcoes*64, valorEntrada + 0.70, _Symbol, valorEntrada + 0.61, 0,ORDER_TIME_DAY,0,""); 
+           
+           //quinto win
+           trade.SellLimit(QuantidadeInicialAcoes*16, valorEntrada + 0.50, _Symbol, valorEntrada + 0.51, 0,ORDER_TIME_DAY,0,"");              
+        }
+    }
+}
+
+void enviarOrdensVenda()
+{
+   //Apenas envia ordem caso não existam outras ordens e esteja dentro do horário de negociação permitido
+   if (PositionsTotal() == 0 && HoraNegociacao() && TradeActive == 0 && TradeOcurredThisDay == 0 && OrdersTotal() == 0)
+   {
+        //indica que o trade é de venda
+        tipoTrade = -1; 
+        
+        //Indicar que esta ocorrendo trade, só irá finalizar com stop ou win
+        TradeActive = 1;
+            
+        //Indicar que ocorreu um trade neste dia e não deve ocorrer outro
+        TradeOcurredThisDay = 1;        
+
+        //No caso de teste no contrato futuro sempre usar 5 minis e os stops e wins variam de 10 em 10 pontos
+        if (testeContratoFuturo)
+        {
+           //ENVIA TODAS AS ORDENS DO TRADE DE VENDA
+           //entrada
+           trade.SellStop(1, valorEntrada, _Symbol, valorEntrada + 10, 0,ORDER_TIME_DAY,0,"");
+           //primeiro win
+           trade.SellStop(1, valorEntrada - 10, _Symbol, valorEntrada, 0,ORDER_TIME_DAY,0,"");
+           //segundo win
+           trade.SellStop(1*2, valorEntrada - 20, _Symbol, valorEntrada - 10, 0,ORDER_TIME_DAY,0,"");    
+           //terceiro win
+           trade.SellStop(1*4, valorEntrada - 30, _Symbol, valorEntrada - 20, 0,ORDER_TIME_DAY,0,"");   
+           //quarto win
+           trade.SellStop(1*8, valorEntrada - 40, _Symbol, valorEntrada - 30, 0,ORDER_TIME_DAY,0,"");              
+           //quinto win
+           trade.BuyLimit(1*16, valorEntrada - 50, _Symbol, valorEntrada - 60, 0,ORDER_TIME_DAY,0,"");        
+        }
+        else
+        {  
+           //Ajuste otimização, ao invés de 1 centavo abaixo entra 1 centavo acima
+           //valorEntrada=valorEntrada+0.02;
+           
+           //ENVIA TODAS AS ORDENS DO TRADE DE VENDA
+           //entrada
+           trade.SellStop(QuantidadeInicialAcoes, valorEntrada, _Symbol, valorEntrada + 0.09-umCentavo, 0,ORDER_TIME_DAY,0,"");
+           //primeiro win
+           trade.SellStop(QuantidadeInicialAcoes, valorEntrada - 0.10, _Symbol, valorEntrada - 0.01-umCentavo, 0,ORDER_TIME_DAY,0,"");
+           //segundo win
+           trade.SellStop(QuantidadeInicialAcoes*2, valorEntrada - 0.20, _Symbol, valorEntrada - 0.11-umCentavo, 0,ORDER_TIME_DAY,0,"");    
+           //terceiro win
+           trade.SellStop(QuantidadeInicialAcoes*4, valorEntrada - 0.30, _Symbol, valorEntrada - 0.21-umCentavo, 0,ORDER_TIME_DAY,0,"");   
+           //quarto win
+           trade.SellStop(QuantidadeInicialAcoes*8, valorEntrada - 0.40, _Symbol, valorEntrada - 0.31-umCentavo, 0,ORDER_TIME_DAY,0,"");              
+           
+           //Caso queira fazer um 6
+           //trade.SellStop(QuantidadeInicialAcoes*16, valorEntrada - 0.50, _Symbol, valorEntrada - 0.41, 0,ORDER_TIME_DAY,0,""); 
+           
+           //Caso queira fazer um 7
+           //trade.SellStop(QuantidadeInicialAcoes*32, valorEntrada - 0.60, _Symbol, valorEntrada - 0.51, 0,ORDER_TIME_DAY,0,"");
+           
+           //Caso queira fazer um 8 
+           //trade.SellStop(QuantidadeInicialAcoes*64, valorEntrada - 0.70, _Symbol, valorEntrada - 0.61, 0,ORDER_TIME_DAY,0,"");
+           
+           //quinto win            
+           trade.BuyLimit(QuantidadeInicialAcoes*16, valorEntrada - 0.50, _Symbol, valorEntrada - 0.51, 0,ORDER_TIME_DAY,0,"");
+        }     
+   }
+}   
+   
+// Verifica se atende o marubozu da estrategia e faz o trade
+bool VerificarOcorreuMarubozu()
+{
+    // Verificar se o candle subiu 8 centavos ou mais, se é de alta e com sombras de até 1 centavo 
+    if (candleClose - candleOpen >= tamanhoCandle && candleHigh - candleClose <= tamanhoSombra && candleOpen - candleLow <= tamanhoSombra)
+    {
+        valorEntrada = candleHigh + 0.02;
+        //StopLoss = valorEntrada - 0.09;
+        //TakeProfit = valorEntrada + 0.10;
+         
+        enviarOrdensCompra(); 
+        return true;
+    }
+    
+    // Verificar se o candle subiu 16 centavos ou mais, se é de alta e com sombras de até 2 centavos
+    else if (candleClose - candleOpen >= tamanhoCandle*2 && candleHigh - candleClose <= tamanhoSombra*2 && candleOpen - candleLow <= tamanhoSombra*2) 
+    {
+        valorEntrada = candleHigh + 0.02;
+        //StopLoss = valorEntrada - 0.09;
+        //TakeProfit = valorEntrada + 0.10;
+        
+        enviarOrdensCompra();          
+        return true;
+    }
+
+    // Verificar se o candle caiu 8 centavos ou mais, se é de baixa e com sombras de até 1 centavo 
+    else if (candleOpen - candleClose >= tamanhoCandle && candleHigh - candleOpen <= tamanhoSombra && candleClose - candleLow <= tamanhoSombra) 
+    {
+        valorEntrada = candleLow - 0.02;
+        //StopLoss = valorEntrada + 0.09;
+        //TakeProfit = valorEntrada - 0.10;
+        
+        enviarOrdensVenda();
+        return true;
+    }
+
+    // Verificar se o candle caiu 16 centavos ou mais, se é de baixa e com sombras de até 2 centavos
+    else if (candleOpen - candleClose >= tamanhoCandle*2 && candleHigh - candleOpen <= tamanhoSombra*2 && candleClose - candleLow <= tamanhoSombra*2) 
+    {
+        valorEntrada = candleLow - 0.02;
+        //StopLoss = valorEntrada + 0.09;
+        //TakeProfit = valorEntrada - 0.10;
+        enviarOrdensVenda();         
+        return true;
+    }
+
+    return false;
+}
+
+// Verifica se atende o rompimento da estrategia e faz o trade
+bool VerificarOcorreuRompimento()
+{
+    //verifica se candle anterior atingiu a máxima do dia com tolerancia de 1 centavo
+    if(candleHigh >= maximaDia - 0.01)
+    {
+       // Verifica se foi encontrada uma nova máxima do dia acima da tolerancia
+       if(candleHigh > maximaDia + 0.01)
+       {
+         // Define nova maxima e define este candle como sendo o primeiro na nova maxima
+         maximaDia = candleHigh;
+         dataCandleMaxima1 = candleTime;
+         quantasVezesTocouMaximaDia = 1;         
+       }
+       else
+       {    
+          //Neste caso, este candle esta na máxima do dia mas dentro da tolerancia de 1 centavo
+          //Pode ser, igual, 1 centavo maior ou 1 centavo menor
+          //Se for 1 centavo maior atualiza a máxima do dia
+          if(candleHigh > maximaDia)
+          {
+            maximaDia = candleHigh;
+          }
+          
+          //Se não existe ainda candle com data maxima neste dia
+          if (dataCandleMaxima1 == NULL)
+          {
+             dataCandleMaxima1 = candleTime;
+             quantasVezesTocouMaximaDia = 1;          
+          }
+          else
+          {
+              if (candleTime == dataCandleMaxima1)
+              {
+                 //Se já é o candle que registrou a máxima, e entrou novamente por ser um novo tick
+                 //Então não realiza nenhuma operação
+              }
+              else
+              {
+                 //Caso seja um candle diferente a tocar a máxima, temos um suporte, realiza o trade de compra
+                 quantasVezesTocouMaximaDia = 2;
+                 
+                 valorEntrada = maximaDia + 0.01;
+                 //StopLoss = valorEntrada - 0.09;
+                 //TakeProfit = valorEntrada + 0.10;
+                 
+                 //Ajuste otimização, ao invés de 1 centavo acima entra 1 centavo abaixo
+                 //valorEntrada=valorEntrada-0.02;                     
+        
+                 enviarOrdensCompra();          
+                 return true;                 
+              }
+          }
+       }  
+    }   
+       
+    //verifica se candle anterior atingiu a mínima do dia com tolerancia de 1 centavo
+    if(candleLow <= minimaDia + 0.01)
+    {
+       // Verifica se foi encontrada uma nova mínima do dia abaixo da tolerancia
+       if(candleLow < minimaDia - 0.01)
+       {
+         // Define nova mínima e define este candle como sendo o primeiro na nova mínima
+         minimaDia = candleLow;
+         dataCandleMinima1 = candleTime;
+         quantasVezesTocouMinimaDia = 1;         
+       }
+       else
+       {    
+          //Neste caso, este candle esta na mínima do dia mas dentro da tolerancia de 1 centavo
+          //Pode ser, igual, 1 centavo maior ou 1 centavo menor
+          //Se for 1 centavo menor atualiza a mínima do dia
+          if(candleHigh > maximaDia)
+          {
+            minimaDia = candleLow;
+          }
+          
+          //Se não existe ainda candle com data minima neste dia
+          if (dataCandleMinima1 == NULL)
+          {
+             dataCandleMinima1 = candleTime;
+             quantasVezesTocouMinimaDia = 1;          
+          }
+          else
+          {
+              if (candleTime == dataCandleMinima1)
+              {
+                 //Se já é o candle que registrou a minima, e entrou novamente por ser um novo tick
+                 //Então não realiza nenhuma operação
+              }
+              else
+              {
+                 //Caso seja um candle diferente a tocar a minima, temos uma resistencia, realiza o trade de venda
+                 quantasVezesTocouMaximaDia = 2;
+                 
+                 valorEntrada = minimaDia - 0.01;
+                 //StopLoss = valorEntrada + 0.09;
+                 //TakeProfit = valorEntrada - 0.10;
+
+                 //Ajuste otimização, ao invés de 1 centavo abaixo entra 1 centavo acima
+                 //valorEntrada=valorEntrada+0.02;
+                         
+                 enviarOrdensVenda();          
+                 return true;                 
+              }
+          }
+       }        
+    }
+
+    return false;
+}
+
+// Verifica se ocorreu dois candles seguidos de alta ou de baixa e faz o trade
+bool VerificarDoisCandlesSeguidos()
+{
+   // Verifica se o candle anterior foi de alta
+   if (candleClose > candleOpen)
+   {
+      //Caso não exista ultimo candle analisado
+      if (dataUltimoCandleAnalisado == NULL)
+      {
+         tipoUltimoCandleAnalisado = 1; //Indica que o candle anterior foi de alta
+         dataUltimoCandleAnalisado = candleTime; //Data do candle anterior
+         maximaUltimoCandleAnalisado = candleHigh; //Valor da máxima do candle anterior
+      }
+      else
+      {
+         if (dataUltimoCandleAnalisado == candleTime)
+         {
+            //Se já é o candle que registrou a alta, e entrou novamente por ser um novo tick
+            //Então não realiza nenhuma operação
+         }
+         else
+         {
+             //Se o candle anterior ainda não havia sido analisado, e a ultima análise era um candle de alta
+             //Então deu dois candles de alta seguidos, o anterior e o antes dele, então faz o trade
+             if (tipoUltimoCandleAnalisado == 1)
+             {
+                 valorEntrada = candleHigh + 0.01;
+                 //StopLoss = valorEntrada - 0.09;
+                 //TakeProfit = valorEntrada + 0.10;
+                 
+                 //Ajuste otimização, ao invés de 1 centavo acima entra 1 centavo abaixo
+                 //valorEntrada=valorEntrada-0.02;                 
+                 
+                 enviarOrdensCompra();          
+                 return true;  
+             }
+             else
+             {
+                 //Caso o último candle analisado não seja de alta, não houve dois seguidos, realizar análise do candle anterior
+                 tipoUltimoCandleAnalisado = 1;
+                 dataUltimoCandleAnalisado = candleTime;
+                 maximaUltimoCandleAnalisado = candleHigh;
+             }
+         }
+      }
+      
+   }
+   
+   // Verifica se o candle anterior foi de baixa
+   if (candleClose < candleOpen)
+   {
+      //Caso não exista ultimo candle analisado
+      if (dataUltimoCandleAnalisado == NULL)
+      {
+         tipoUltimoCandleAnalisado = -1; //Indica que o candle anterior foi de baixa
+         dataUltimoCandleAnalisado = candleTime; //Data do candle anterior
+         minimaUltimoCandleAnalisado = candleLow; //Valor da minima do candle anterior
+      }
+      else
+      {
+         if (dataUltimoCandleAnalisado == candleTime)
+         {
+            //Se já é o candle que registrou a baixa, e entrou novamente por ser um novo tick
+            //Então não realiza nenhuma operação
+         }
+         else
+         {
+             //Se o candle anterior ainda não havia sido analisado, e a ultima análise era um candle de baixa
+             //Então deu dois candles de baixa seguidos, o anterior e o antes dele, então faz o trade
+             if (tipoUltimoCandleAnalisado == -1)
+             {
+                 valorEntrada = candleLow - 0.01;
+                 //StopLoss = valorEntrada - 0.09;
+                 //TakeProfit = valorEntrada + 0.10;
+
+                 //Ajuste otimização, ao invés de 1 centavo abaixo entra 1 centavo acima
+                 //valorEntrada=valorEntrada+0.02;
+                   
+                 enviarOrdensVenda();          
+                 return true;  
+             }
+             else
+             {
+                 //Caso o último candle analisado não seja de baixa, mas não houve dois seguidos, realizar análise do candle anterior
+                 tipoUltimoCandleAnalisado = -1;
+                 dataUltimoCandleAnalisado = candleTime;
+                 minimaUltimoCandleAnalisado = candleLow;
+             }
+         }
+      }
+      
+   }   
+              
+    return false;
+}
